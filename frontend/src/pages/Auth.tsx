@@ -3,6 +3,7 @@ import { BookOpen, Eye, EyeOff, Loader2, Sparkles, Brain, Zap } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 interface AuthPageProps {
   onAuth: (user: { name: string; email: string }) => void;
@@ -33,13 +34,61 @@ export default function AuthPage({ onAuth }: AuthPageProps) {
     }
 
     setIsLoading(true);
-    // Simulate auth (replace with real Supabase auth calls)
-    await new Promise((r) => setTimeout(r, 900));
+
+    if (mode === "signup") {
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: { full_name: name.trim() },
+        },
+      });
+
+      setIsLoading(false);
+
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+
+      // If email confirmation is required, Supabase returns a user but no session.
+      if (data.user && !data.session) {
+        toast.success("Account created! Check your email to confirm before signing in.");
+        setMode("login");
+        return;
+      }
+
+      toast.success("Account created!");
+      onAuth({ name: name.trim(), email: email.trim() });
+      return;
+    }
+
+    // mode === "login"
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+
     setIsLoading(false);
 
-    const displayName = mode === "signup" ? name.trim() : email.split("@")[0];
-    toast.success(mode === "login" ? "Welcome back!" : "Account created!");
-    onAuth({ name: displayName, email: email.trim() });
+    if (error) {
+      // Supabase returns a generic message for bad credentials on purpose,
+      // so we don't leak whether the email exists.
+      toast.error(
+        error.message === "Invalid login credentials"
+          ? "Incorrect email or password."
+          : error.message
+      );
+      return;
+    }
+
+    const displayName =
+      (data.user?.user_metadata?.full_name as string | undefined) ||
+      data.user?.email?.split("@")[0] ||
+      "Student";
+
+    toast.success("Welcome back!");
+    onAuth({ name: displayName, email: data.user?.email ?? email.trim() });
   };
 
   const features = [
