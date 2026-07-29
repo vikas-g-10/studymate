@@ -1,0 +1,178 @@
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index d737b91..57c4126 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,4 +1,4 @@
+-import { useState } from "react";
++import { useEffect, useState } from "react";
+ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+ import { BrowserRouter, Route, Routes } from "react-router-dom";
+ import { Toaster as Sonner } from "@/components/ui/sonner";
+@@ -11,31 +11,77 @@ import MedicalReportPage from "./pages/MedicalReport.tsx";
+ import AuthPage from "./pages/Auth.tsx";
+ import NotFound from "./pages/NotFound.tsx";
+ import { AuthContext } from "./lib/auth-context.ts";
++import { supabase } from "@/integrations/supabase/client";
+ 
+ const queryClient = new QueryClient();
+ 
+ type User = { name: string; email: string } | null;
+ 
++// Guest mode is a deliberate local-only escape hatch (no Supabase session).
++// It's tracked separately from `user` so it can never be confused with a
++// real, verified Supabase session.
++const GUEST_USER: User = { name: "Guest", email: "guest@studymate.app" };
++
+ const App = () => {
+-  const [user, setUser] = useState<User>(() => {
+-    try {
+-      const saved = localStorage.getItem("studymate.user");
+-      return saved ? JSON.parse(saved) : null;
+-    } catch {
+-      return null;
+-    }
+-  });
++  const [user, setUser] = useState<User>(null);
++  const [isGuest, setIsGuest] = useState(false);
++  const [initializing, setInitializing] = useState(true);
++
++  useEffect(() => {
++    // Restore an existing Supabase session (e.g. on page refresh).
++    supabase.auth.getSession().then(({ data: { session } }) => {
++      if (session?.user) {
++        setUser({
++          name:
++            (session.user.user_metadata?.full_name as string | undefined) ||
++            session.user.email?.split("@")[0] ||
++            "Student",
++          email: session.user.email ?? "",
++        });
++      }
++      setInitializing(false);
++    });
++
++    // Keep local state in sync with Supabase's own auth state (login,
++    // logout, token refresh, session expiry) instead of trusting a
++    // self-reported localStorage value.
++    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
++      if (session?.user) {
++        setIsGuest(false);
++        setUser({
++          name:
++            (session.user.user_metadata?.full_name as string | undefined) ||
++            session.user.email?.split("@")[0] ||
++            "Student",
++          email: session.user.email ?? "",
++        });
++      } else {
++        setUser((prev) => (isGuest ? prev : null));
++      }
++    });
++
++    return () => listener.subscription.unsubscribe();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
+ 
+   const handleAuth = (u: { name: string; email: string }) => {
++    // Only the explicit guest button should ever produce a userless session.
++    if (u.email === GUEST_USER.email) {
++      setIsGuest(true);
++    }
+     setUser(u);
+-    localStorage.setItem("studymate.user", JSON.stringify(u));
+   };
+ 
+-  const handleLogout = () => {
++  const handleLogout = async () => {
++    setIsGuest(false);
+     setUser(null);
+-    localStorage.removeItem("studymate.user");
++    await supabase.auth.signOut();
+   };
+ 
++  if (initializing) {
++    return null;
++  }
++
+   if (!user) {
+     return (
+       <QueryClientProvider client={queryClient}>
+diff --git a/frontend/src/pages/Auth.tsx b/frontend/src/pages/Auth.tsx
+index 7c8625e..157642d 100644
+--- a/frontend/src/pages/Auth.tsx
++++ b/frontend/src/pages/Auth.tsx
+@@ -3,6 +3,7 @@ import { BookOpen, Eye, EyeOff, Loader2, Sparkles, Brain, Zap } from "lucide-rea
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { toast } from "sonner";
++import { supabase } from "@/integrations/supabase/client";
+ 
+ interface AuthPageProps {
+   onAuth: (user: { name: string; email: string }) => void;
+@@ -33,13 +34,61 @@ export default function AuthPage({ onAuth }: AuthPageProps) {
+     }
+ 
+     setIsLoading(true);
+-    // Simulate auth (replace with real Supabase auth calls)
+-    await new Promise((r) => setTimeout(r, 900));
++
++    if (mode === "signup") {
++      const { data, error } = await supabase.auth.signUp({
++        email: email.trim(),
++        password,
++        options: {
++          data: { full_name: name.trim() },
++        },
++      });
++
++      setIsLoading(false);
++
++      if (error) {
++        toast.error(error.message);
++        return;
++      }
++
++      // If email confirmation is required, Supabase returns a user but no session.
++      if (data.user && !data.session) {
++        toast.success("Account created! Check your email to confirm before signing in.");
++        setMode("login");
++        return;
++      }
++
++      toast.success("Account created!");
++      onAuth({ name: name.trim(), email: email.trim() });
++      return;
++    }
++
++    // mode === "login"
++    const { data, error } = await supabase.auth.signInWithPassword({
++      email: email.trim(),
++      password,
++    });
++
+     setIsLoading(false);
+ 
+-    const displayName = mode === "signup" ? name.trim() : email.split("@")[0];
+-    toast.success(mode === "login" ? "Welcome back!" : "Account created!");
+-    onAuth({ name: displayName, email: email.trim() });
++    if (error) {
++      // Supabase returns a generic message for bad credentials on purpose,
++      // so we don't leak whether the email exists.
++      toast.error(
++        error.message === "Invalid login credentials"
++          ? "Incorrect email or password."
++          : error.message
++      );
++      return;
++    }
++
++    const displayName =
++      (data.user?.user_metadata?.full_name as string | undefined) ||
++      data.user?.email?.split("@")[0] ||
++      "Student";
++
++    toast.success("Welcome back!");
++    onAuth({ name: displayName, email: data.user?.email ?? email.trim() });
+   };
+ 
+   const features = [
