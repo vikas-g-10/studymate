@@ -5,7 +5,7 @@ import { Menu } from "lucide-react";
 import { AppSidebar } from "./AppSidebar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { loadNotes, saveNotes, loadTheme, saveTheme } from "@/lib/study-storage";
+import { loadNotes, saveNotes, loadTheme, saveTheme, setNotesUser } from "@/lib/study-storage";
 import type { ChatMessage, Note, Summary } from "@/lib/study-types";
 import { useAuth } from "@/lib/auth-context";
 import { summarizeContent } from "@/lib/anthropic";
@@ -28,7 +28,7 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -37,19 +37,22 @@ export function AppShell({ children }: AppShellProps) {
   const location = useLocation();
 
   useEffect(() => {
+    // Point the storage layer at this account's own bucket before reading
+    // anything, so we never load (or later overwrite) another user's notes.
+    setNotesUser(user?.email ?? null);
     const loaded = loadNotes();
     setNotes(loaded);
-    if (loaded.length > 0) setActiveId(loaded[0].id);
+    setActiveId(loaded.length > 0 ? loaded[0].id : null);
     const t = loadTheme();
     setTheme(t);
     document.documentElement.classList.toggle("dark", t === "dark");
-  }, []);
+  }, [user?.email]);
 
   useEffect(() => {
-    if (notes.length > 0 || (typeof window !== "undefined" && localStorage.getItem("studymate.notes.v1"))) {
+    if (notes.length > 0 || (typeof window !== "undefined" && localStorage.getItem("studymate.notes.v1." + (user?.email ?? "guest")))) {
       saveNotes(notes);
     }
-  }, [notes]);
+  }, [notes, user?.email]);
 
   useEffect(() => {
     setSidebarOpen(false);

@@ -1,14 +1,27 @@
 import type { Note } from "./study-types";
 
-const KEY = "studymate.notes.v1";
 const THEME_KEY = "studymate.theme";
 const TTS_LANG_KEY = "studymate.tts.lang";
 const TTS_RATE_KEY = "studymate.tts.rate";
 
+// Every note read/write goes through notesKey(), which is namespaced by the
+// currently signed-in user. Without this, all accounts shared one global
+// localStorage bucket ("studymate.notes.v1"), so every user saw the same
+// notes/history regardless of who was logged in.
+let currentUserKey: string | null = null;
+
+/** Call this on login/logout (with the user's id or email, or null for signed-out/guest). */
+export const setNotesUser = (key: string | null) => {
+  currentUserKey = key;
+};
+
+const notesKey = (): string =>
+  currentUserKey ? `studymate.notes.v1.${currentUserKey}` : "studymate.notes.v1.guest";
+
 export const loadNotes = (): Note[] => {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(notesKey());
     if (!raw) return [];
     return JSON.parse(raw) as Note[];
   } catch {
@@ -18,7 +31,7 @@ export const loadNotes = (): Note[] => {
 
 export const saveNotes = (notes: Note[]) => {
   if (typeof window === "undefined") return;
-  localStorage.setItem(KEY, JSON.stringify(notes));
+  localStorage.setItem(notesKey(), JSON.stringify(notes));
 };
 
 export const addNote = (note: Note) => {
@@ -26,7 +39,7 @@ export const addNote = (note: Note) => {
   const existing = loadNotes();
   if (existing.some((n) => n.content === note.content)) return;
   const next = [note, ...existing];
-  localStorage.setItem(KEY, JSON.stringify(next));
+  localStorage.setItem(notesKey(), JSON.stringify(next));
 };
 
 export const loadTheme = (): "light" | "dark" => {
