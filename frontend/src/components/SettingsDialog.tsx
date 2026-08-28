@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { getUserApiKey, setUserApiKey, clearUserApiKey } from "@/hooks/use-api-key";
 import { toast } from "sonner";
+import { getAIMode, setAIMode } from "@/lib/anthropic";
 
 function detectProvider(key: string): "anthropic" | "openrouter" | null {
   if (!key) return null;
@@ -25,17 +26,63 @@ export function SettingsDialog() {
   const [key, setKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [hasKey, setHasKey] = useState(false);
-
+  const [aiMode, setAiMode] = useState<"cloud" | "local">("cloud");
+  const [localAIStatus, setLocalAIStatus] = useState<"idle" | "testing" | "connected" | "error">("idle");
   useEffect(() => {
     if (open) {
       const stored = getUserApiKey();
       setKey(stored ?? "");
       setHasKey(!!stored);
       setShowKey(false);
+      setAiMode(getAIMode());
+      setLocalAIStatus("idle");
     }
   }, [open]);
 
   const provider = detectProvider(key.trim());
+
+  const handleModeChange = (mode: "cloud" | "local") => {
+  setAiMode(mode);
+  setAIMode(mode);
+  setLocalAIStatus("idle");
+
+  if (mode === "local") {
+    toast.success("Local AI mode enabled.");
+  } else {
+    toast.success("Cloud AI mode enabled.");
+  }
+};
+
+const testLocalAI = async () => {
+  setLocalAIStatus("testing");
+
+  try {
+    const response = await fetch("http://localhost:11434/api/tags");
+
+    if (!response.ok) {
+      throw new Error("Ollama is not responding.");
+    }
+
+    const data = await response.json();
+
+    const hasModel = data.models?.some(
+      (model: { name?: string }) => model.name === "qwen2.5:7b"
+    );
+
+    if (!hasModel) {
+      throw new Error("Qwen2.5 7B model was not found in Ollama.");
+    }
+
+    setLocalAIStatus("connected");
+    toast.success("Local AI connected — Qwen2.5 7B is ready.");
+  } catch (error) {
+    console.error("Local AI connection error:", error);
+    setLocalAIStatus("error");
+    toast.error(
+      "Could not connect to Ollama. Make sure Ollama is running."
+    );
+  }
+};
 
   const handleSave = () => {
     const trimmed = key.trim();
@@ -81,6 +128,80 @@ export function SettingsDialog() {
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
+        {/* AI Mode */}
+<div className="space-y-2">
+  <Label>AI Mode</Label>
+
+  <div className="grid grid-cols-2 gap-2">
+    <button
+      type="button"
+      onClick={() => handleModeChange("cloud")}
+      className={`rounded-lg border p-3 text-left transition-colors ${
+        aiMode === "cloud"
+          ? "border-primary bg-primary/10"
+          : "border-border hover:bg-muted"
+      }`}
+    >
+      <p className="font-medium text-sm">☁️ Cloud AI</p>
+      <p className="text-xs text-muted-foreground mt-1">
+        Use your API key
+      </p>
+    </button>
+
+    <button
+      type="button"
+      onClick={() => handleModeChange("local")}
+      className={`rounded-lg border p-3 text-left transition-colors ${
+        aiMode === "local"
+          ? "border-primary bg-primary/10"
+          : "border-border hover:bg-muted"
+      }`}
+    >
+      <p className="font-medium text-sm">💻 Local AI</p>
+      <p className="text-xs text-muted-foreground mt-1">
+        Use Ollama on this PC
+      </p>
+    </button>
+  </div>
+
+  {aiMode === "local" && (
+    <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium">Ollama</p>
+          <p className="text-xs text-muted-foreground">
+            http://localhost:11434
+          </p>
+        </div>
+
+        <span className="text-xs font-mono">
+          qwen2.5:7b
+        </span>
+      </div>
+
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={testLocalAI}
+        disabled={localAIStatus === "testing"}
+        className="w-full"
+      >
+        {localAIStatus === "testing"
+          ? "Testing..."
+          : localAIStatus === "connected"
+          ? "✓ Local AI Connected"
+          : "Test Local AI Connection"}
+      </Button>
+
+      {localAIStatus === "error" && (
+        <p className="text-xs text-destructive">
+          Ollama could not be reached. Make sure Ollama is running.
+        </p>
+      )}
+    </div>
+  )}
+</div>
           {/* Status badge */}
           <div className="flex items-center gap-2 rounded-lg border px-3 py-2 bg-muted/40">
             <span className={`h-2 w-2 rounded-full shrink-0 ${hasKey ? "bg-green-500" : "bg-yellow-500"}`} />
