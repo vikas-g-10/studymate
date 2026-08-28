@@ -2,7 +2,21 @@ import { getUserApiKey } from "@/hooks/use-api-key";
 
 // ─── Provider detection ───────────────────────────────────────────────────────
 
-type Provider = "anthropic" | "openrouter";
+type Provider = "anthropic" | "openrouter" | "local";
+
+type AIMode = "cloud" | "local";
+
+const LOCAL_OLLAMA_URL = "http://localhost:11434";
+const LOCAL_MODEL = "qwen2.5:7b";
+const LOCAL_VISION_MODEL = "qwen2.5vl:3b";
+
+export function getAIMode(): AIMode {
+  return (localStorage.getItem("studymate-ai-mode") as AIMode) || "cloud";
+}
+
+export function setAIMode(mode: AIMode) {
+  localStorage.setItem("studymate-ai-mode", mode);
+}
 
 function detectProvider(key: string): Provider {
   if (key.startsWith("sk-ant-")) return "anthropic";
@@ -33,15 +47,141 @@ function getApiKey(): string {
   return key;
 }
 
+async function callLocalAI(opts: {
+  system: string;
+  messages: Array<{
+  role: "user" | "assistant";
+  content: unknown;
+  images?: string[];
+}>;
+  max_tokens: number;
+}): Promise<string> {
+  const ollamaMessages = opts.messages.map((message) => {
+    // Normal text message
+    if (typeof message.content === "string") {
+      return {
+        role: message.role,
+        content: message.content,
+      };
+    }
+
+    // Vision message
+    if (Array.isArray(message.content)) {
+      let text = "";
+      const images: string[] = [];
+
+      for (const part of message.content as Array<Record<string, any>>) {
+        // Text part
+        if (part.type === "text" && typeof part.text === "string") {
+          text += part.text;
+        }
+
+        // Anthropic image format
+        if (
+          part.type === "image" &&
+          part.source?.type === "base64" &&
+          typeof part.source.data === "string"
+        ) {
+          images.push(part.source.data);
+        }
+
+        // OpenAI / OpenRouter image format
+        if (
+          part.type === "image_url" &&
+          typeof part.image_url?.url === "string"
+        ) {
+          const dataUrl = part.image_url.url;
+
+          // Ollama wants only the base64 data, not:
+          // data:image/jpeg;base64,...
+          const match = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+
+          if (match) {
+            images.push(match[1]);
+          } else {
+            images.push(dataUrl);
+          }
+        }
+      }
+
+      return {
+        role: message.role,
+        content: text,
+        ...(images.length > 0 ? { images } : {}),
+      };
+    }
+
+    // Fallback
+    return {
+      role: message.role,
+      content: String(message.content ?? ""),
+    };
+  });
+
+  const response = await fetch(`${LOCAL_OLLAMA_URL}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: LOCAL_MODEL,
+      stream: false,
+      messages: [
+        {
+          role: "system",
+          content: opts.system,
+        },
+        ...ollamaMessages,
+      ],
+      options: {
+        num_predict: opts.max_tokens,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+
+    throw new Error(
+      `Local AI error ${response.status}: ${
+        text || "Could not connect to Ollama."
+      }`
+    );
+  }
+
+  const data = await response.json();
+
+  const content = data.message?.content;
+
+  if (!content || typeof content !== "string") {
+    console.error("Unexpected Ollama response:", data);
+    throw new Error(
+      "Ollama returned an empty response. Check the browser console."
+    );
+  }
+
+  return content;
+}
+
 async function callAI(opts: {
   useVision?: boolean;
   system: string;
-  messages: Array<{ role: "user" | "assistant"; content: unknown }>;
+  messages: Array<{
+  role: "user" | "assistant";
+  content: unknown;
+  images?: string[];
+}>;
   max_tokens: number;
 }): Promise<string> {
-  const key = getApiKey();
-  const provider = detectProvider(key);
-  const model = opts.useVision ? MODELS[provider].vision : MODELS[provider].default;
+ const mode = getAIMode();
+
+if (mode === "local") {
+  return callLocalAI(opts);
+}
+
+const key = getApiKey();
+const provider = detectProvider(key);
+const model = opts.useVision ? MODELS[provider].vision : MODELS[provider].default;
 
   let url: string;
   let headers: Record<string, string>;
@@ -284,50 +424,158 @@ export async function interpretMedicalReport(opts: {
   imageDataUrl?: string;
 }) {
   if (!opts.text && !opts.imageDataUrl) {
-    throw new Error("Provide either text or an imageDataUrl from a medical report.");
-  }
-  if (opts.text && opts.text.length > 30000) {
-    throw new Error("Text is too long. Please paste up to 30,000 characters.");
+    throw new Error(
+      "Provide either text or an imageDataUrl from a medical report."
+    );
   }
 
+  if (opts.text && opts.text.length > 30000) {
+    throw new Error(
+      "Text is too long. Please paste up to 30,000 characters."
+    );
+  }
+
+  const mode = getAIMode();
+
+  // ─────────────────────────────────────────────
+  // Local AI — Ollama
+  // ─────────────────────────────────────────────
+  if (mode === "local") {
+  let messages: Array<{
+    role: "user" | "assistant";
+    content: unknown;
+    images?: string[];
+  }>;
+
+  if (opts.imageDataUrl) {
+    const matches = opts.imageDataUrl.match(
+      /^data:([^;]+);base64,(.+)$/
+    );
+
+    if (!matches) {
+      throw new Error("Invalid image data URL.");
+    }
+
+    const base64Image = matches[2];
+
+    messages = [
+      {
+        role: "user",
+        content: `Here is an image of a medical report.
+
+Carefully read the image, including handwritten or printed text.
+
+Extract only information that is actually visible in the report.
+
+Follow the system instructions exactly.
+
+IMPORTANT:
+Return ONLY a valid JSON object.
+Do not use markdown.
+Do not add explanations before or after the JSON.
+
+The JSON must contain exactly these fields:
+reportType, about, keyFindings, values, abnormalFlags, nextSteps.`,
+        images: [base64Image],
+      },
+    ];
+  } else {
+    messages = [
+      {
+        role: "user",
+        content: `Medical report text:\n\n${opts.text}`,
+      },
+    ];
+  }
+
+  const raw = await callAI({
+    useVision: !!opts.imageDataUrl,
+    system: MEDICAL_SYSTEM,
+    messages,
+    max_tokens: 3000,
+  });
+
+  return parseJson(raw);
+}
+
+  // ─────────────────────────────────────────────
+  // Cloud AI — Anthropic / OpenRouter
+  // ─────────────────────────────────────────────
   const key = getApiKey();
   const provider = detectProvider(key);
 
   if (opts.imageDataUrl) {
-    const matches = opts.imageDataUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (!matches) throw new Error("Invalid image data URL.");
+    const matches = opts.imageDataUrl.match(
+      /^data:([^;]+);base64,(.+)$/
+    );
+
+    if (!matches) {
+      throw new Error("Invalid image data URL.");
+    }
 
     let userContent: unknown;
+
     if (provider === "anthropic") {
       userContent = [
-        { type: "text", text: "Here is an image of a medical report. Please read its contents and interpret." },
-        { type: "image", source: { type: "base64", media_type: matches[1], data: matches[2] } },
+        {
+          type: "text",
+          text: "Here is an image of a medical report. Please read its contents and interpret.",
+        },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: matches[1],
+            data: matches[2],
+          },
+        },
       ];
     } else {
       // OpenRouter / OpenAI vision format
       userContent = [
-        { type: "text", text: "Here is an image of a medical report. Please read its contents and interpret." },
-        { type: "image_url", image_url: { url: opts.imageDataUrl } },
+        {
+          type: "text",
+          text: "Here is an image of a medical report. Please read its contents and interpret.",
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: opts.imageDataUrl,
+          },
+        },
       ];
     }
 
     const raw = await callAI({
       useVision: true,
       system: MEDICAL_SYSTEM,
-      messages: [{ role: "user", content: userContent as string }],
+      messages: [
+        {
+          role: "user",
+          content: userContent,
+        },
+      ],
       max_tokens: 3000,
     });
+
     return parseJson(raw);
   }
 
-  // Text-only — same for both providers
+  // Text-only medical report
   const raw = await callAI({
     system: MEDICAL_SYSTEM,
-    messages: [{ role: "user", content: `Medical report text:\n\n${opts.text}` }],
+    messages: [
+      {
+        role: "user",
+        content: `Medical report text:\n\n${opts.text}`,
+      },
+    ],
     max_tokens: 3000,
   });
+
   return parseJson(raw);
 }
+
 
 // ─── Flowchart ────────────────────────────────────────────────────────────────
 
